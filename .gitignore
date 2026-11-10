@@ -1,0 +1,20 @@
+/target/
+
+# Secrets and machine state: never commit these.
+*.key
+*.pem
+.env
+.env.*
+local.env
+CLAUDE.local.md
+
+# Editor, OS and tool leftovers.
+*.log
+*.bak
+*.orig
+*.swp
+*~
+.DS_Store
+.idea/
+.vscode/
+.claude/

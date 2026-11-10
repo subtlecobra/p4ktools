@@ -1,0 +1,16 @@
+[package]
+name = "p4k-scene"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+p4k = { path = "../p4k" }
+p4k-formats = { path = "../formats" }
+serde_json.workspace = true
+base64.workspace = true
+regex.workspace = true
+rayon.workspace = true
+indexmap.workspace = true
+memmap2.workspace = true
+memchr.workspace = true

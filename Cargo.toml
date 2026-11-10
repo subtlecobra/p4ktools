@@ -1,0 +1,29 @@
+[workspace]
+resolver = "2"
+members = ["crates/p4k", "crates/formats", "crates/scene"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+
+[workspace.dependencies]
+memmap2 = "0.9"
+flate2 = { version = "1", default-features = false, features = ["zlib-rs"] }
+zstd = "0.13"
+rayon = "1"
+serde_json = { version = "1", features = ["preserve_order"] }
+regex = "1"
+base64 = "0.21"
+indexmap = "2"
+memchr = "2"
+
+# Profiles only apply when building inside this workspace; a project that depends on these crates uses its own.
+[profile.release]
+opt-level = 3
+debug = false
+lto = "thin"
+codegen-units = 16
+
+[profile.test]
+opt-level = 2
