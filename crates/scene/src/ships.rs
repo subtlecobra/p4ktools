@@ -99,6 +99,7 @@ pub struct Ships<'a> {
     helpers: Mutex<HashMap<String, Arc<PortHelpers>>>,
     nodes: Mutex<HashMap<String, Arc<HashMap<String, Mat>>>>,
     own: Mutex<HashMap<String, Arc<Vec<Dv>>>>,
+    oc: Mutex<HashMap<String, Vec<String>>>,
 }
 
 fn field<'v>(v: &'v Dv, k: &str) -> Option<&'v Dv> {
@@ -129,7 +130,7 @@ pub fn data_key(path: &str) -> String {
 
 impl<'a> Ships<'a> {
     pub fn new(items: &'a ItemMaterials, p4k: &'a P4k) -> Ships<'a> {
-        Ships { items, p4k, helpers: Mutex::new(HashMap::new()), nodes: Mutex::new(HashMap::new()), own: Mutex::new(HashMap::new()) }
+        Ships { items, p4k, helpers: Mutex::new(HashMap::new()), nodes: Mutex::new(HashMap::new()), own: Mutex::new(HashMap::new()), oc: Mutex::new(HashMap::new()) }
     }
 
     pub(crate) fn data(&self, cls: &str, depth: usize) -> Option<Dv> {
@@ -162,6 +163,40 @@ impl<'a> Ships<'a> {
     /// The `ZoneSpec` of `/zonedata/ship:<cls>`: the containers placed by their record offsets, the hull model,
     /// the default loadout items with their riders and palettes, the livery of `paint` ('' = the default) and the vehicle commands.
     pub fn ship_zone_spec(&self, cls: &str, paint: Option<&str>) -> Result<ZoneSpec, String> {
+        self.ship_zone_spec_swapped(cls, paint, &HashMap::new())
+    }
+
+    /// The object container an ITEM brings along (`SObjectContainerComponentParams.objectContainer`), e.g. the Galaxy modules' interiors
+    /// (`RSI_Galaxy_Module_OC_*`).  EMPIRICAL (4.10.3 archive): the module item itself has none; it lists the `..._OC_<kind>` item in its own default
+    /// loadout (`hardpoint_module_oc`), so the item's own loadout entries are read too.
+    pub fn item_containers(&self, cls: &str) -> Vec<String> {
+        fn one(s: &Ships, cls: &str) -> Option<String> {
+            let data = s.data(cls, 4)?;
+            list(data.get("Components")).iter().find_map(|c| match c {
+                Dv::Obj(o) if o.struct_name == "SObjectContainerComponentParams" => opt_str(c.get("objectContainer")),
+                _ => None,
+            })
+        }
+        if let Some(v) = self.oc.lock().unwrap().get(cls) {
+            return v.clone();
+        }
+        let mut out: Vec<String> = one(self, cls).into_iter().collect();
+        for e in self.own_loadout(cls).iter() {
+            if let Dv::Obj(eo) = e {
+                let c = self.items.entry_class(eo);
+                if !c.is_empty() {
+                    out.extend(one(self, &c));
+                }
+            }
+        }
+        out.dedup();
+        self.oc.lock().unwrap().insert(cls.to_string(), out.clone());
+        out
+    }
+
+    /// `ship_zone_spec` with loadout swaps ({port path: class}, already cleaned): the object containers of the swapped-in items (the Galaxy
+    /// modules) replace those of the default ones.  The default loadout's own items with a container are added too (the stock module).
+    pub fn ship_zone_spec_swapped(&self, cls: &str, paint: Option<&str>, swaps: &HashMap<String, String>) -> Result<ZoneSpec, String> {
         let rec = self.ship_record(cls).ok_or_else(|| format!("no vehicle component: {}", cls))?;
         let cidx = self.p4k.lower_index(".socpak");
         let (mut parts, mut missing) = (vec![], vec![]);
@@ -172,8 +207,30 @@ impl<'a> Ships<'a> {
             }
         }
         let mut unplaced = 0usize;
+        {
+            // containers carried by loadout items; INFERRED: placed in ship space like the record's own containers (identity offset)
+            let tree = self.loadout_tree(cls, &mut unplaced, Some(swaps), None);
+            let mut files: Vec<String> = vec![];
+            fn walk(s: &Ships, nodes: &[TreeNode], files: &mut Vec<String>) {
+                for n in nodes {
+                    if n.geo.is_none() && !n.cls.is_empty() {
+                        files.extend(s.item_containers(&n.cls));
+                    }
+                    walk(s, &n.children, files);
+                }
+            }
+            walk(self, &tree, &mut files);
+            files.dedup();
+            for f in files {
+                match cidx.map.get(&data_key(&f)) {
+                    Some(&i) => parts.push((self.p4k.entries[i].name.to_string(), IDENT)),
+                    None => missing.push(f.replace('\\', "/").rsplit('/').next().unwrap().to_string()),
+                }
+            }
+            unplaced = 0;
+        }
         let extras: Vec<Extra> = self
-            .loadout_items(cls, &mut unplaced, None, None)
+            .loadout_items(cls, &mut unplaced, Some(swaps), None)
             .into_iter()
             .map(|it| Extra {
                 pal: paints::class_palette(self.items, &it.cls),
