@@ -91,6 +91,19 @@ pub fn is_ref3(v: &Value) -> bool {
     matches!(v, Value::Array(a) if a.len() == 3 && a[1].as_u64() != Some(0xFFFF_FFFF))
 }
 
+/// The localisation key of a `Name` that points at a key the language file does not hold (`@item_Nameksar_lmg_energy_01` ->
+/// `item_Nameksar_lmg_energy_01`), shown instead of a guessed name (user rule 2026-11-15).  None for the empty / placeholder
+/// keys (`@LOC_UNINITIALIZED`, `@LOC_EMPTY`, `@LOC_PLACEHOLDER ...`).
+pub fn unresolved_key(name: &Value) -> Option<String> {
+    let k = name.as_str()?.strip_prefix('@')?;
+    let up = k.to_uppercase();
+    if k.is_empty() || up.starts_with("LOC_") || up.contains("PLACEHOLDER") {
+        None
+    } else {
+        Some(k.to_string())
+    }
+}
+
 pub fn pretty(cls: &str) -> String {
     let mut out = String::new();
     let mut prev = false;
@@ -239,7 +252,13 @@ impl<'a> ItemStats<'a> {
             if bad(&text) && cls.ends_with("_SCItem") {
                 text = self.localise_str(&format!("@item_Name{}", &cls[..cls.len() - 7]));
             }
-            out["name"] = json!(if bad(&text) { pretty(cls) } else { text.unwrap() });
+            out["name"] = json!(if !bad(&text) {
+                text.unwrap()
+            } else if text.is_none() {
+                unresolved_key(g(loc, "Name")).unwrap_or_else(|| pretty(cls))
+            } else {
+                pretty(cls)
+            });
             if let Some(mrec) = self.rref(g(&att, "Manufacturer"), 4) {
                 if truthy(&mrec) {
                     out["manufacturer"] = json!(self.localise(g(g(&mrec, "Localization"), "Name")).unwrap_or_default());
@@ -733,5 +752,20 @@ mod distortion_tests {
     #[test]
     fn distortion_section_absent_without_data() {
         assert!(distortion_section(&json!({"Components": [{"__struct__": "SHealthComponentParams", "Health": 5.0}]})).into_iter().flatten().next().is_none());
+    }
+}
+
+#[cfg(test)]
+mod unresolved_key_tests {
+    use super::*;
+
+    #[test]
+    fn real_key_is_shown_placeholders_are_not() {
+        assert_eq!(unresolved_key(&json!("@item_Nameksar_lmg_energy_01")).as_deref(), Some("item_Nameksar_lmg_energy_01"));
+        assert_eq!(unresolved_key(&json!("@LOC_UNINITIALIZED")), None);
+        assert_eq!(unresolved_key(&json!("@LOC_EMPTY")), None);
+        assert_eq!(unresolved_key(&json!("@LOC_PLACEHOLDER_x")), None);
+        assert_eq!(unresolved_key(&json!("")), None);
+        assert_eq!(unresolved_key(&Value::Null), None);
     }
 }
