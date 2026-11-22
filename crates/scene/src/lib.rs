@@ -37,6 +37,7 @@ pub mod bodydamage;
 pub mod lootrev;
 pub mod materials;
 pub mod mfd;
+pub mod objectpreset;
 pub mod outfit;
 pub mod overlay;
 pub mod paints;
