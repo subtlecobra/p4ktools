@@ -837,6 +837,55 @@ pub fn read_child_containers(z: &SocZip) -> Vec<Entity> {
     out
 }
 
+/// The structures a body's main metadata declares (possibly nested), each with its **world (body-frame)** matrix.
+///
+/// Walks the `<ChildObjectContainers>` tree of `main` (the metadata matching the body id, e.g. `stanton2b.xml`) and composes every
+/// `<Child>`'s `pos`/`rot` down the chain: a child's world transform is `compose(parent, quat_scale_pos_matrix(rot, 1, pos))`.  A child is
+/// recorded when it names a `.socpak` with a `pos`; a child is also a *location* (re-curser) when it carries a nested
+/// `<ChildObjectContainers>`.
+///
+/// PROVEN (sc-45, 2026-11-22, follow-up to `5e5a101b`): a planet body's depth-0 `<Child>` are *locations*
+/// (`RastarLocationEntity`) at surface radius in the planet-centre frame, and body-local -> planet-centre is the **identity** (no stored
+/// surface anchor); their depth-1 `<Child>` are the structures with `pos`/`rot` **relative to the location**.  The per-structure world
+/// transform is exactly `P = pos_loc + R(rot_loc)*pos_child ; Q = rot_loc*rot_child` = `compose(loc, child)` here.  The exporter writes a
+/// surface-tangent frame into `rot` (+Z = radial up).  Daymar's `.altg` is empty (all counts 0), so the body gets **no** terrain-height
+/// re-snap and these authored values are final (sc-45's `GetPositionOnTerrainInternal` 0x1426dd880 confirms the height-only re-snap path
+/// is the one that would move them, and it is not applied for this body).
+pub fn read_nested_structures(z: &SocZip, main: &str) -> Vec<Entity> {
+    let Ok(data) = z.read(main) else { return vec![] };
+    let Some(root) = parse_meta_xml(&data) else { return vec![] };
+    let mut out = vec![];
+    if let Some(kids) = root.find("ChildObjectContainers") {
+        walk_containers(&kids.children, &IDENT, &mut out);
+    }
+    out
+}
+
+fn walk_containers(kids: &[Element], parent: &[f64; 12], out: &mut Vec<Entity>) {
+    for c in kids {
+        if c.tag != "Child" {
+            continue;
+        }
+        let q = floats_or(c.get("rot"), [1.0, 0.0, 0.0, 0.0]);
+        let pos = floats_or(c.get("pos"), [0.0; 3]);
+        let world = compose(parent, &quat_scale_pos_matrix(q, [1.0; 3], pos));
+        let path = c.get("name").unwrap_or("").replace('\\', "/").to_lowercase();
+        if path.ends_with(".socpak") && c.get("pos").is_some() {
+            out.push(Entity {
+                name: get_t(c, "entityName").map(str::to_owned).unwrap_or_else(|| path.rsplit('/').next().unwrap().to_string()),
+                cls: c.get("class").map(str::to_owned),
+                matrix: world,
+                container: Some(path),
+                guid: c.get("guid").map(str::to_owned),
+                ..Default::default()
+            });
+        }
+        if let Some(nested) = c.find("ChildObjectContainers") {
+            walk_containers(&nested.children, &world, out);
+        }
+    }
+}
+
 /// Rounded position key of the duplicate test (rounded to 2 decimals; -0.0 and 0.0 are one key).
 fn round2(v: f64) -> u64 {
     (format!("{:.2}", v).parse::<f64>().unwrap_or(v) + 0.0).to_bits()

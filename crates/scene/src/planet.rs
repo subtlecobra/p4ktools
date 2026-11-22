@@ -182,6 +182,33 @@ pub fn elevation(p4k: &P4k, path: &str) -> Result<(usize, usize, Vec<u8>), Strin
     Ok((w, h, bytes.to_vec()))
 }
 
+/// The structure containers a body declares (nested through its locations), each with its **world (body-frame)**
+/// placement (the 3x4 `matrix`: pos at m[3]/m[7]/m[11]) and the socpak path of its geometry.
+///
+/// PROVEN (sc-45, 2026-11-22, follow-up to `5e5a101b`): a planet body's depth-0 `<Child>` are *locations*
+/// (`RastarLocationEntity`) at surface radius in the planet-centre frame, and body-local -> planet-centre is the
+/// **identity** (no stored surface anchor — the anchors *are* the locations).  Each location's depth-1 `<Child>` are
+/// the structures with `pos`/`rot` **relative to the location**; the per-structure world transform is
+/// `P = pos_loc + R(rot_loc)*pos_child ; Q = rot_loc*rot_child`.  Flattening `.//Child` mixes the two frames
+/// (location vs. location-local) and is wrong — [`p4k_formats::socpak::read_nested_structures`] walks the tree
+/// instead.  Daymar's `.altg` is empty, so the body gets no terrain-height re-snap and the authored values are final.
+pub fn body_structures(p4k: &P4k, b: &BodyFiles) -> Result<Vec<Value>, String> {
+    let name = b.container();
+    let e = p4k.get(&name).ok_or_else(|| format!("{} is not in the archive", name))?;
+    let data = p4k.read(e).map_err(|e| e.to_string())?;
+    let z = SocZip::open(&data).map_err(|e| e.to_string())?;
+    // the body's main metadata is the .xml whose basename matches the body id (e.g. stanton2b.xml)
+    let main = z
+        .namelist()
+        .find(|n| n.to_lowercase().replace('\\', "/").rsplit('/').next() == Some(&format!("{}.xml", b.id)))
+        .ok_or("no main metadata in the container")?;
+    let kids = p4k_formats::socpak::read_nested_structures(&z, &main);
+    Ok(kids
+        .into_iter()
+        .filter_map(|c| c.container.map(|path| json!({ "path": path, "name": c.name, "guid": c.guid, "m": c.matrix })))
+        .collect())
+}
+
 /// A map from `resolve_maps` as PNG at the largest level up to `max` pixels.
 pub fn map_png(p4k: &P4k, path: &str, max: usize) -> Option<Vec<u8>> {
     let tex = DdsTexture::new(p4k, p4k.get(path)?, false).ok()?;
