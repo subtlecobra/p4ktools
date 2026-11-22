@@ -209,6 +209,20 @@ pub fn body_structures(p4k: &P4k, b: &BodyFiles) -> Result<Vec<Value>, String> {
         .collect())
 }
 
+/// The body's depth-0 locations (settlements, outposts, crash sites, orbital clusters ...) with their planet-centre-frame
+/// placements and structure counts; see [`p4k_formats::socpak::read_locations`].
+pub fn body_locations(p4k: &P4k, b: &BodyFiles) -> Result<Vec<Value>, String> {
+    let name = b.container();
+    let e = p4k.get(&name).ok_or_else(|| format!("{} is not in the archive", name))?;
+    let data = p4k.read(e).map_err(|e| e.to_string())?;
+    let z = SocZip::open(&data).map_err(|e| e.to_string())?;
+    let main = z
+        .namelist()
+        .find(|n| n.to_lowercase().replace('\\', "/").rsplit('/').next() == Some(&format!("{}.xml", b.id)))
+        .ok_or("no main metadata in the container")?;
+    Ok(p4k_formats::socpak::read_locations(&z, &main))
+}
+
 /// A map from `resolve_maps` as PNG at the largest level up to `max` pixels.
 pub fn map_png(p4k: &P4k, path: &str, max: usize) -> Option<Vec<u8>> {
     let tex = DdsTexture::new(p4k, p4k.get(path)?, false).ok()?;

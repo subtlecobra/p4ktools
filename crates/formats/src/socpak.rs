@@ -886,6 +886,65 @@ fn walk_containers(kids: &[Element], parent: &[f64; 12], out: &mut Vec<Entity>) 
     }
 }
 
+/// The body's depth-0 `<Child>` entries: its *locations* (`RastarLocationEntity` and the other container classes the body
+/// declares directly), each with its planet-centre-frame placement and a count of the structures nested beneath it.
+///
+/// PROVEN (sc-45, 2026-11-22): a planet body's depth-0 `<Child>` are locations at surface radius in the planet-centre frame;
+/// EMPIRICAL (Daymar's `stanton2b.xml`): most carry `entityName`, `class`, `pos` and `rot` and nest their structures in
+/// `<ChildObjectContainers>`, while a few name a `.socpak` directly (crash sites, orbital clusters) and have no children.  The
+/// count uses the same rule as [`read_nested_structures`] (a `.socpak` with a `pos`), counting the entry itself when it names one.
+pub fn read_locations(z: &SocZip, main: &str) -> Vec<Value> {
+    let Ok(data) = z.read(main) else { return vec![] };
+    let Some(root) = parse_meta_xml(&data) else { return vec![] };
+    locations_from_root(&root)
+}
+
+pub fn locations_from_root(root: &Element) -> Vec<Value> {
+    let Some(kids) = root.find("ChildObjectContainers") else { return vec![] };
+    kids.children.iter()
+        .filter(|c| c.tag == "Child")
+        .filter(|c| c.get("pos").is_some())
+        .map(|c| {
+            let q = floats_or(c.get("rot"), [1.0, 0.0, 0.0, 0.0]);
+            let pos = floats_or(c.get("pos"), [0.0; 3]);
+            let path = c.get("name").unwrap_or("").replace('\\', "/").to_lowercase();
+            let self_structure = path.ends_with(".socpak");
+            let mut structures = usize::from(self_structure);
+            if let Some(nested) = c.find("ChildObjectContainers") {
+                structures += structure_count(&nested.children);
+            }
+            let name = get_t(c, "entityName")
+                .map(str::to_owned)
+                .or_else(|| get_t(c, "name").map(|p| p.rsplit('/').next().unwrap_or(p).to_string()))
+                .unwrap_or_else(|| "location".into());
+            json!({
+                "name": name,
+                "cls": c.get("class").map(str::to_owned),
+                "guid": c.get("guid").map(str::to_owned),
+                "path": if path.is_empty() { None } else { Some(path) },
+                "pos": pos,
+                "rot": q,
+                "m": quat_scale_pos_matrix(q, [1.0; 3], pos),
+                "structures": structures,
+            })
+        })
+        .collect()
+}
+
+fn structure_count(kids: &[Element]) -> usize {
+    kids.iter()
+        .filter(|c| c.tag == "Child")
+        .map(|c| {
+            let path = c.get("name").unwrap_or("").replace('\\', "/").to_lowercase();
+            let mut n = usize::from(path.ends_with(".socpak") && c.get("pos").is_some());
+            if let Some(nested) = c.find("ChildObjectContainers") {
+                n += structure_count(&nested.children);
+            }
+            n
+        })
+        .sum()
+}
+
 /// Rounded position key of the duplicate test (rounded to 2 decimals; -0.0 and 0.0 are one key).
 fn round2(v: f64) -> u64 {
     (format!("{:.2}", v).parse::<f64>().unwrap_or(v) + 0.0).to_bits()
@@ -1051,5 +1110,36 @@ mod tests {
         let (e, notes) = read_render_nodes(&[0, 0]);
         assert!(e.is_empty());
         assert!(notes[0].starts_with("render node chunk truncated"));
+    }
+
+    #[test]
+    fn locations_take_the_depth_0_children_and_count_nested_structures() {
+        let xml = r#"<ObjectContainer name="body">
+            <ChildObjectContainers>
+                <Child external="1" name="" entityName="town" class="RastarLocationEntity" guid="g1" pos="1,2,3" rot="1,0,0,0">
+                    <ChildObjectContainers>
+                        <Child external="1" name="Data/a/b.socpak" entityName="s1" class="RastarPlacedElement" pos="0,0,0"/>
+                        <Child external="1" name="Data/a/c.socpak" entityName="s2" class="RastarPlacedElement" pos="1,0,0">
+                            <ChildObjectContainers>
+                                <Child external="1" name="Data/a/d.socpak" entityName="s3" class="RastarPlacedElement" pos="0,1,0"/>
+                            </ChildObjectContainers>
+                        </Child>
+                        <Child external="1" name="" entityName="not-a-structure" class="RastarPlacedElement" pos="0,0,1"/>
+                    </ChildObjectContainers>
+                </Child>
+                <Child external="1" name="Data/wreck.socpak" entityName="wreck" class="ObjectContainerModifier" pos="4,5,6" rot="0,0,0,1"/>
+                <Child external="1" name="Data/no-pos.socpak" entityName="skipped"/>
+            </ChildObjectContainers>
+        </ObjectContainer>"#;
+        let root = plainxml::parse(xml.as_bytes()).unwrap();
+        let v = locations_from_root(&root);
+        assert_eq!(v.len(), 2);
+        assert_eq!(v[0]["name"], "town");
+        assert_eq!(v[0]["cls"], "RastarLocationEntity");
+        assert_eq!(v[0]["pos"], json!([1.0, 2.0, 3.0]));
+        assert_eq!(v[0]["structures"], 3);
+        assert_eq!(v[1]["name"], "wreck");
+        assert_eq!(v[1]["path"], "data/wreck.socpak");
+        assert_eq!(v[1]["structures"], 1, "an entry that names a .socpak counts itself");
     }
 }
