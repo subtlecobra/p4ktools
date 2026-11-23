@@ -766,6 +766,9 @@ impl<'a> MatRegistry<'a> {
         self.prefetch(s, hair.is_some());
         let tex = match &s.diffuse_tex {
             Some(d) if hair.is_none() => self.texture(d, ""),
+            // Organic (planet rock / cave shells, 2,432 sub-materials): no TexSlot1 diffuse; TexSlot11 is the macro diffuse of the cave-shell generation (EMPIRICAL: rock01.mtl
+            // wall / floor / ceiling).  How the game mixes it with the three MatLayers is not confirmed, see docs/cave_rendering.md.
+            None if hair.is_none() && s.shader == "Organic" => s.texture("TexSlot11").map_or(-1, |d| self.texture(d, "")),
             _ => -1,
         };
         let sh = s.shader.as_str();
@@ -773,7 +776,8 @@ impl<'a> MatRegistry<'a> {
         mat.insert("name".into(), json!(s.name));
         mat.insert("shader".into(), json!(s.shader));
         mat.insert("nodraw".into(), json!(sh.to_lowercase() == "nodraw"));
-        mat.insert("color".into(), g4(&s.diffuse));
+        // an Organic material's Diffuse is 0,0,0 in the cave shells (the colour comes from the layers / the macro map): multiplying the macro map by it would draw black
+        mat.insert("color".into(), if sh == "Organic" && tex >= 0 { g4(&[1.0, 1.0, 1.0]) } else { g4(&s.diffuse) });
         mat.insert("emissive".into(), json!([0.0, 0.0, 0.0]));
         mat.insert("opacity".into(), json!(s.opacity));
         mat.insert("alpha_test".into(), json!(s.alpha_test));
@@ -1091,7 +1095,8 @@ impl<'a> MatRegistry<'a> {
         if self.lazy_textures && s.shader == "MeshDecal" {
             return self.decal_maps(s);
         }
-        if !self.lazy_textures || (s.shader != "Illum" && shader_fx(&s.shader) != Some("illum")) {
+        let organic = s.shader == "Organic" && self.lazy_textures;
+        if !self.lazy_textures || (!organic && s.shader != "Illum" && shader_fx(&s.shader) != Some("illum")) {
             return None;
         }
         let mut out = Map::new();
@@ -1105,9 +1110,7 @@ impl<'a> MatRegistry<'a> {
             out.insert("spec".into(), json!(v));
         }
         out.insert("specColor".into(), g4(&s.specular));
-        let b2 = self.blend_layer(s);
-        let dt = self.detail(s);
-        let pm = self.illum_pom(s);
+        let (b2, dt, pm) = if organic { (None, None, None) } else { (self.blend_layer(s), self.detail(s), self.illum_pom(s)) };
         let any = ["norm", "spec"].iter().any(|k| out.get(*k).and_then(Value::as_i64).unwrap_or(-1) >= 0) || b2.is_some() || dt.is_some() || pm.is_some();
         if let Some(b) = b2 {
             out.insert("layer2".into(), b);

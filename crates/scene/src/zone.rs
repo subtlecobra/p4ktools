@@ -573,6 +573,7 @@ struct VolOut {
 /// each class stores and what is guessed.
 fn compile_volumes(stats: &Stats) -> VolOut {
     let (mut boxes, mut rooms, mut shapes, mut nshapes) = (vec![], vec![], vec![], 0usize);
+    let mut fogp: Vec<Value> = vec![];
     let (mut fogs, mut actions, mut navs, mut markers, mut nnavs) = (vec![], vec![], vec![], vec![], 0usize);
     let (mut rconns, mut ledges, mut covers, mut nledges, mut ncovers) = (vec![], vec![], vec![], 0usize, 0usize);
     let (mut dboxes, mut splines, mut nsplines) = (vec![], vec![], 0usize);
@@ -629,6 +630,7 @@ fn compile_volumes(stats: &Stats) -> VolOut {
             "fog" => {
                 let h = half(&vol["size"], 1e-3);
                 fogs.push(rm5(&compose(m, &[h[0], 0.0, 0.0, 0.0, 0.0, h[1], 0.0, 0.0, 0.0, 0.0, h[2], 0.0])));
+                fogp.push(json!([vol["dens"], vol["rs"], vol["re"], vol["ri"], vol["area"]]));
             }
             "roomconnector" => {
                 let h = half(&vol["size"], 1e-3);
@@ -695,7 +697,7 @@ fn compile_volumes(stats: &Stats) -> VolOut {
     for x in &markers {
         mk.add(x["c"].as_str().unwrap_or(""));
     }
-    let json = serde_json::to_vec(&json!({"boxes": boxes, "rooms": rooms, "shapes": shapes, "lightboxes": lboxes, "fogs": fogs,
+    let json = serde_json::to_vec(&json!({"boxes": boxes, "rooms": rooms, "shapes": shapes, "lightboxes": lboxes, "fogs": fogs, "fogp": fogp,
         "actions": actions, "navs": navs, "markers": markers, "rconns": rconns, "ledges": ledges,
         "covers": covers, "dboxes": dboxes, "splines": splines}))
     .unwrap();
@@ -730,7 +732,7 @@ fn compile_lights(stats: &Stats) -> (Vec<u8>, Counts) {
         if k == "lightbox" {
             continue;
         }
-        let t = if k == "envlight" { "Env".to_string() } else { light["type"].as_str().unwrap_or("None").to_string() };
+        let t = if k == "envlight" || k == "envprobe" { "Env".to_string() } else { light["type"].as_str().unwrap_or("None").to_string() };
         counts.add(&t);
         let r = light["radius"].as_f64().unwrap_or(0.0);
         let plane = arr_f(&light["plane"]);
@@ -742,6 +744,9 @@ fn compile_lights(stats: &Stats) -> (Vec<u8>, Counts) {
             "f": light.get("fov").cloned().unwrap_or(json!(90.0)),
             "w": pw, "h": ph,
             "a": light.get("active").map_or(true, |v| !matches!(v, Value::Bool(false) | Value::Null)),
+            "i": light.get("intensity").cloned().unwrap_or(json!(1.0)), "fm": light.get("fogm").cloned().unwrap_or(json!(1.0)),
+            "at": light.get("att").cloned().unwrap_or(json!(1.0)), "ob": light.get("obj").cloned().unwrap_or(json!(true)),
+            "sz": light.get("size").cloned().unwrap_or(Value::Null), "pi": light.get("intensity").cloned().unwrap_or(Value::Null),
             "fl": light["flare"].as_bool().unwrap_or(false),
             "m": rm5(m)
         }));

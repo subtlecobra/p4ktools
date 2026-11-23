@@ -236,31 +236,7 @@ pub fn compose(a: &[f64; 12], b: &[f64; 12]) -> [f64; 12] {
 /// half-extent (INFERRED).  NOT modelled: styleParams.angularSpeed spinners and named lightanimation tracks.
 pub fn light_info(root: &Element) -> Option<Value> {
     match root.get("EntityClass") {
-        Some("Light") => {
-            let mut out = json!({"kind": "light", "guid": root.get("EntityCryGUID"), "type": "None", "radius": fl_or(root, "Radius", 1.0), "bulb": 0.0,
-                "color": null, "temp": null, "intensity": 1.0, "fov": 90.0, "plane": [1.0, 1.0], "active": true, "flare": false});
-            let Some(comp) = find_desc(root, "EntityComponentLight") else { return Some(out) };
-            out["type"] = json!(get_t(comp, "lightType").unwrap_or("None"));
-            out["active"] = json!(comp.get("active") != Some("0"));
-            if let Some(size) = comp.find("sizeParams") {
-                out["radius"] = json!(fl_or(size, "lightRadius", out["radius"].as_f64().unwrap_or(1.0)));
-                out["bulb"] = json!(fl_or(size, "bulbRadius", 0.0));
-                out["plane"] = json!([fl_or(size, "planeWidth", 1.0), fl_or(size, "planeHeight", 1.0)]);
-            }
-            if let Some(st) = comp.find("defaultState") {
-                out["intensity"] = json!(fl_or(st, "intensity", 1.0));
-                if let Some(c) = st.find("color") {
-                    out["color"] = json!([fl_or(c, "r", 0.0), fl_or(c, "g", 0.0), fl_or(c, "b", 0.0)]);
-                } else if comp.get("useTemperature") == Some("1") && get_t(st, "temperature").is_some() {
-                    out["temp"] = json!(fl(st, "temperature"));
-                }
-            }
-            if let Some(pr) = comp.find("projectorParams") {
-                out["fov"] = json!(fl_or(pr, "FOV", 90.0));
-            }
-            out["flare"] = json!(comp.find("flareParams").map_or(false, |f| f.get("flareEnabled") == Some("1")));
-            Some(out)
-        }
+        Some("Light") => Some(light_params(root, fl_or(root, "Radius", 1.0))),
         Some("LightBox") => {
             let b = find_desc(root, "BBox_os")?;
             let (lo, hi) = (floats::<3>(b.get("Min"))?, floats::<3>(b.get("Max"))?);
@@ -269,6 +245,79 @@ pub fn light_info(root: &Element) -> Option<Value> {
         Some("EnvironmentLight") => Some(json!({"kind": "envlight", "radius": fl_or(root, "Radius", 1.0)})),
         _ => None,
     }
+}
+
+/// Parameters of one light element (a `Light` entity or a `BakedInLights/Light` member of a LightGroup); `radius0` = the radius when sizeParams has none.
+/// Beyond `light_info`'s editor fields: `intensity` (defaultState), `fogm` (fogMultiplier), `att` (attenuationTweak), `obj` / `fog` (affectsObjects / affectsFog),
+/// `spec` (specularMultiplier).  Units of `intensity` against the engine's radiance: see docs/cave_rendering.md (EMPIRICAL data, the scale is not CONFIRMED).
+pub fn light_params(root: &Element, radius0: f64) -> Value {
+    let mut out = json!({"kind": "light", "guid": root.get("EntityCryGUID"), "type": "None", "radius": radius0, "bulb": 0.0,
+        "color": null, "temp": null, "intensity": 1.0, "fov": 90.0, "plane": [1.0, 1.0], "active": true, "flare": false,
+        "fogm": 1.0, "att": 1.0, "obj": true, "fog": true, "spec": 1.0});
+    let Some(comp) = find_desc(root, "EntityComponentLight") else { return out };
+    out["type"] = json!(get_t(comp, "lightType").unwrap_or("None"));
+    out["active"] = json!(comp.get("active") != Some("0"));
+    out["obj"] = json!(comp.get("affectsObjects") != Some("0"));
+    out["fog"] = json!(comp.get("affectsFog") != Some("0"));
+    if let Some(size) = comp.find("sizeParams") {
+        out["radius"] = json!(fl_or(size, "lightRadius", radius0));
+        out["bulb"] = json!(fl_or(size, "bulbRadius", 0.0));
+        out["plane"] = json!([fl_or(size, "planeWidth", 1.0), fl_or(size, "planeHeight", 1.0)]);
+    }
+    if let Some(m) = comp.find("miscParams") {
+        out["fogm"] = json!(fl_or(m, "fogMultiplier", 1.0));
+        out["att"] = json!(fl_or(m, "attenuationTweak", 1.0));
+        out["spec"] = json!(fl_or(m, "specularMultiplier", 1.0));
+    }
+    if let Some(st) = comp.find("defaultState") {
+        out["intensity"] = json!(fl_or(st, "intensity", 1.0));
+        if let Some(c) = st.find("color") {
+            out["color"] = json!([fl_or(c, "r", 0.0), fl_or(c, "g", 0.0), fl_or(c, "b", 0.0)]);
+        } else if comp.get("useTemperature") == Some("1") && get_t(st, "temperature").is_some() {
+            out["temp"] = json!(fl(st, "temperature"));
+        }
+    }
+    if let Some(pr) = comp.find("projectorParams") {
+        out["fov"] = json!(fl_or(pr, "FOV", 90.0));
+    }
+    out["flare"] = json!(comp.find("flareParams").map_or(false, |f| f.get("flareEnabled") == Some("1")));
+    out
+}
+
+/// The members of a LightGroup entity (`EntityComponentLightGroup/BakedInLights`): each a `Light` or `EnvironmentProbe` record with its own
+/// `RelativeXForm` (rotation w,x,y,z + translation, relative to the group entity).  EMPIRICAL (rock01 cave containers: 6 groups in a size-02 system, tens of
+/// members each; the zone viewer only counted them until 2026-11-23).  An EnvironmentProbe becomes `{"kind": "envprobe", size, intensity, color, ...}`.
+/// Returns (light JSON, member name, 3x4 matrix relative to the entity).
+pub fn group_lights(root: &Element) -> Vec<(Value, String, [f64; 12])> {
+    let mut out = vec![];
+    if root.get("EntityClass") != Some("LightGroup") {
+        return out;
+    }
+    let Some(baked) = iter_all(root).into_iter().find(|e| e.tag == "BakedInLights") else { return out };
+    for m in &baked.children {
+        if m.tag != "Light" && m.tag != "EnvironmentProbe" {
+            continue;
+        }
+        let rel = m.find("RelativeXForm").map_or(IDENT, |x| {
+            quat_scale_pos_matrix(floats_or(x.get("rotation"), [1.0, 0.0, 0.0, 0.0]), [1.0; 3], floats_or(x.get("translation"), [0.0; 3]))
+        });
+        let name = m.get("Name").unwrap_or("").to_string();
+        let v = if m.tag == "Light" {
+            light_params(m, 1.0)
+        } else {
+            let Some(comp) = find_desc(m, "EntityComponentEnvironmentLight") else { continue };
+            let size = comp.find("sizeParams");
+            let st = comp.find("defaultState");
+            let col = st.and_then(|s| s.find("color")).map_or([1.0; 3], |c| [fl_or(c, "r", 1.0), fl_or(c, "g", 1.0), fl_or(c, "b", 1.0)]);
+            json!({"kind": "envprobe", "active": comp.get("active") != Some("0"),
+                "size": [size.map_or(10.0, |s| fl_or(s, "sizeX", 10.0)), size.map_or(10.0, |s| fl_or(s, "sizeY", 10.0)), size.map_or(10.0, |s| fl_or(s, "sizeZ", 10.0))],
+                "global": size.map_or(false, |s| s.get("global") == Some("1")), "intensity": st.map_or(1.0, |s| fl_or(s, "intensity", 1.0)), "color": col,
+                "gb": find_desc(comp, "runtimeParams").map_or(false, |r| r.get("runtimeGBuffer") == Some("1")),
+                "cube": find_desc(comp, "miscParams").and_then(|r| get_t(r, "cubemapTexture")).unwrap_or("")})
+        };
+        out.push((v, name, rel));
+    }
+    out
 }
 
 /// 3x4 matrix of a Segment transform_ls string 'Q : w,x,y,z | T : x,y,z' (identity when absent or malformed).
@@ -375,7 +424,11 @@ pub fn volume_info(root: &Element) -> Option<Value> {
         "FogVolume" => {
             // EMPIRICAL: FogVolumeComponentParams/size is the FULL extent; volumeType is unknown, every fog volume is a box.
             let size = find_desc_child(root, "FogVolume", "size").or_else(|| find_desc(root, "size"))?;
-            Some(json!({"kind": "fog", "size": [fl_or(size, "x", 1.0), fl_or(size, "y", 1.0), fl_or(size, "z", 1.0)]}))
+            let fp = find_desc(root, "FogVolume").filter(|e| e.get("globalDensity").is_some());
+            let g = |k: &str, d: f64| fp.map_or(d, |e| fl_or(e, k, d));
+            Some(json!({"kind": "fog", "size": [fl_or(size, "x", 1.0), fl_or(size, "y", 1.0), fl_or(size, "z", 1.0)],
+                "dens": g("globalDensity", 1.0), "rs": g("rampStart", 0.0), "re": g("rampEnd", 0.0), "ri": g("rampInfluence", 1.0),
+                "area": fp.map_or(false, |e| e.get("affectsThisAreaOnly") == Some("1"))}))
         }
         "RoomConnector" => {
             // EMPIRICAL: defaultAreaBounds x/y/z is the FULL size of the connector box (the entity Radius is half its diagonal); a
@@ -505,6 +558,8 @@ pub struct Entity {
     pub geometry: Option<String>,
     pub container: Option<String>,
     pub light: Option<Value>,
+    /// members of a LightGroup (`group_lights`)
+    pub group_lights: Vec<(Value, String, [f64; 12])>,
     pub volume: Option<Value>,
     pub guid: Option<String>,
     pub links: Vec<String>,
@@ -555,6 +610,7 @@ fn entity_from_root(root: &Element, fallback_name: &str) -> Entity {
         geometry: geom,
         container,
         light: light_info(root),
+        group_lights: group_lights(root),
         volume: volume_info(root),
         guid: root.get("EntityCryGUID").map(str::to_owned),
         links: entity_links(root),
@@ -1094,6 +1150,33 @@ mod tests {
         assert_eq!((e.decal_sort, e.decal_depth, e.vdr), (16, 126, Some(77)));
         assert_eq!(e.decal.as_deref(), Some("Data/Materials/Decals/x.mtl"));
         assert_eq!((e.matrix[0], e.matrix[3]), (2.0, 5.0));
+    }
+
+    #[test]
+    fn light_group_members_become_lights_and_probes() {
+        let xml = r#"<Entity EntityClass="LightGroup"><EntityComponentLightGroup><BakedInLights>
+            <Light Name="l1"><EntityComponentLight active="1" lightType="SoftOmni" affectsObjects="1"><sizeParams lightRadius="6" bulbRadius="1"/>
+              <defaultState intensity="0.005"><color r="0.1" g="0.5" b="1"/></defaultState><miscParams fogMultiplier="20" attenuationTweak="2"/></EntityComponentLight>
+              <RelativeXForm rotation="1,0,0,0" translation="1,2,3"/></Light>
+            <EnvironmentProbe Name="p1"><EntityComponentEnvironmentLight active="1"><sizeParams sizeX="80" sizeY="40" sizeZ="20"/><defaultState intensity="1"><color r="1" g="1" b="1"/></defaultState></EntityComponentEnvironmentLight>
+              <RelativeXForm rotation="1,0,0,0" translation="0,0,0"/></EnvironmentProbe>
+            </BakedInLights></EntityComponentLightGroup></Entity>"#;
+        let root = plainxml::parse(xml.as_bytes()).unwrap();
+        let g = group_lights(&root);
+        assert_eq!(g.len(), 2);
+        let (l, name, m) = &g[0];
+        assert_eq!(name, "l1");
+        assert_eq!(l["type"], "SoftOmni");
+        assert_eq!(l["radius"].as_f64(), Some(6.0));
+        assert_eq!(l["intensity"].as_f64(), Some(0.005));
+        assert_eq!(l["fogm"].as_f64(), Some(20.0));
+        assert_eq!(l["att"].as_f64(), Some(2.0));
+        assert_eq!((m[3], m[7], m[11]), (1.0, 2.0, 3.0));
+        assert_eq!(g[1].0["kind"], "envprobe");
+        assert_eq!(g[1].0["size"][0].as_f64(), Some(80.0));
+        // not a LightGroup: nothing
+        let other = plainxml::parse(br#"<Entity EntityClass="Light"/>"#).unwrap();
+        assert!(group_lights(&other).is_empty());
     }
 
     #[test]

@@ -314,6 +314,9 @@ pub fn collect_instances_cat(
             }
             continue;
         }
+        for (l, name, rel) in &en.group_lights {
+            stats.lights.push((l.clone(), name.clone(), compose(&m, rel)));
+        }
         if let Some(l) = &en.light {
             stats.lights.push((l.clone(), en.name.clone(), m));
             continue;
