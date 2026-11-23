@@ -518,6 +518,10 @@ pub struct Entity {
     pub pal: Option<String>,
     /// view-distance ratio byte of render nodes and decals
     pub vdr: Option<u8>,
+    /// decal nodes: the u32 sortPriority at +0x84 (draw order of overlapping boxes, INFERRED) and the depth byte at +0x83 (`depth = b * 0.99 / 255 + 0.01`, sc-45 QDecal1;
+    /// what the engine does with it is UNKNOWN, decals.md 6.3)
+    pub decal_sort: u32,
+    pub decal_depth: u8,
     /// non-empty only for the palette-table pseudo entity
     pub palettes: Vec<String>,
 }
@@ -744,6 +748,8 @@ pub fn read_render_nodes(chunk: &[u8]) -> (Vec<Entity>, Vec<String>) {
                         matrix: quat_scale_pos_matrix([q[3], q[0], q[1], q[2]], [s, s, s], p3),
                         decal: Some(mats[mi].replace('\\', "/")),
                         vdr: Some(u8_at(chunk, pos + 0x3E)?),
+                        decal_sort: u32_at(chunk, pos + 0x84)?,
+                        decal_depth: u8_at(chunk, pos + 0x83)?,
                         ..Default::default()
                     });
                 }
@@ -1055,6 +1061,40 @@ pub fn merge_declared_children(ents: &mut Vec<Entity>, kids: Vec<Entity>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A synthetic chunk 0x10 with one decal node: the sortPriority (u32 at +0x84) and the depth byte (+0x83) are read next to the pose and the material.
+    #[test]
+    fn decal_node_sort_priority_and_depth_byte() {
+        let mut c: Vec<u8> = vec![];
+        c.extend(0u32.to_le_bytes()); // N1 legacy entries
+        c.extend(0u32.to_le_bytes()); // N2 geometry paths
+        c.extend(1u32.to_le_bytes()); // one material, no palette
+        let mut name = b"Data/Materials/Decals/x.mtl".to_vec();
+        name.resize(256, 0);
+        c.extend(&name);
+        let mut hdr = vec![0u8; 0x20];
+        hdr[0..4].copy_from_slice(&12u32.to_le_bytes()); // header version
+        hdr[28..32].copy_from_slice(&(DECAL_STRIDE as u32).to_le_bytes());
+        c.extend(&hdr);
+        let mut n = vec![0u8; DECAL_STRIDE];
+        n[0..4].copy_from_slice(&NODE_DECAL.to_le_bytes());
+        n[0x3E] = 77;
+        n[0x40..0x48].copy_from_slice(&0.0f64.to_le_bytes()); // q.x
+        n[0x58..0x60].copy_from_slice(&1.0f64.to_le_bytes()); // q.w
+        n[0x60..0x68].copy_from_slice(&5.0f64.to_le_bytes());
+        n[0x78..0x80].copy_from_slice(&2.0f64.to_le_bytes());
+        n[0x80..0x82].copy_from_slice(&0u16.to_le_bytes());
+        n[0x83] = 126;
+        n[0x84..0x88].copy_from_slice(&16u32.to_le_bytes());
+        c.extend(&n);
+        let (ents, notes) = read_render_nodes(&c);
+        assert!(notes.is_empty(), "{:?}", notes);
+        assert_eq!(ents.len(), 1);
+        let e = &ents[0];
+        assert_eq!((e.decal_sort, e.decal_depth, e.vdr), (16, 126, Some(77)));
+        assert_eq!(e.decal.as_deref(), Some("Data/Materials/Decals/x.mtl"));
+        assert_eq!((e.matrix[0], e.matrix[3]), (2.0, 5.0));
+    }
 
     #[test]
     fn identity_quaternion() {

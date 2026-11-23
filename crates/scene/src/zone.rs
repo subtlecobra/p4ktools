@@ -756,16 +756,20 @@ fn compile_lights(stats: &Stats) -> (Vec<u8>, Counts) {
 /// axis in a browser, pixels changed against no decals): local Z changes 4x more pixels than X or Y for every material tried, so the
 /// viewer defaults to local Z.  Returns (binary, table, skipped).
 fn compile_decals(stats: &Stats, reg: &mut MatRegistry) -> (Vec<u8>, Vec<Value>, usize) {
-    let mut by_mat: HashMap<&str, Vec<&Mat>> = HashMap::new();
+    type Rec<'r> = (&'r Mat, u32, u8);
+    let mut by_mat: HashMap<&str, Vec<Rec>> = HashMap::new();
     let mut order: Vec<&str> = vec![];
-    for (path, m) in &stats.decals {
+    for (path, m, sort, depth) in &stats.decals {
         by_mat.entry(path).or_insert_with(|| {
             order.push(path);
             vec![]
         });
-        by_mat.get_mut(path.as_str()).unwrap().push(m);
+        by_mat.get_mut(path.as_str()).unwrap().push((m, *sort, *depth));
     }
-    let (mut mids, mut mats, mut table) = (vec![], vec![], vec![]);
+    // draw order: the engine's sortPriority (u32 at node +0x84; probably the draw order of overlapping boxes, INFERRED); the materials are drawn one after the
+    // other (instanced), so the group order is that of the lowest priority of each material, ties in order of first appearance (stable sort)
+    order.sort_by_key(|p| by_mat[p].iter().map(|r| r.1).min().unwrap_or(0));
+    let (mut mids, mut mats, mut table, mut sorts, mut depths) = (vec![], vec![], vec![], vec![], vec![]);
     for path in order {
         let gi = reg.resolve(path, 0);
         let Some(mat) = (gi >= 0).then(|| reg.materials[gi as usize].clone()) else { continue };
@@ -773,11 +777,20 @@ fn compile_decals(stats: &Stats, reg: &mut MatRegistry) -> (Vec<u8>, Vec<Value>,
             continue; // nothing to draw (no material file, or no diffuse map in the archive)
         }
         let d = mat.get("decal").cloned().unwrap_or(json!({"falloff": 1.0, "angle": 0.0, "opac": -1}));
-        table.push(json!({"path": path, "tex": mat["tex"], "opacity": mat["opacity"], "falloff": d["falloff"],
-            "angle": d["angle"], "opac": d.get("opac").cloned().unwrap_or(json!(-1)), "color": mat["color"], "n": by_mat[path].len()}));
-        for m in &by_mat[path] {
+        let mut row = json!({"path": path, "tex": mat["tex"], "opacity": mat["opacity"], "falloff": d["falloff"],
+            "angle": d["angle"], "opac": d.get("opac").cloned().unwrap_or(json!(-1)), "color": mat["color"], "n": by_mat[path].len()});
+        // the projected-decal pixel shader's other inputs (materials.rs projected_decal_params): factors, blend modes, cull masks, tile / offset, maps
+        for k in ["cb", "nb", "gb", "am", "nm", "sm", "ic", "ot", "dt", "nt", "norm", "spec", "sc"] {
+            if let Some(v) = d.get(k) {
+                row[k] = v.clone();
+            }
+        }
+        table.push(row);
+        for (m, sort, depth) in &by_mat[path] {
             mids.push(table.len() as u32 - 1);
             mats.extend(m.iter().map(|v| *v as f32));
+            sorts.push(*sort);
+            depths.push(*depth);
         }
     }
     let skipped = stats.decals.len() - mids.len();
@@ -788,6 +801,11 @@ fn compile_decals(stats: &Stats, reg: &mut MatRegistry) -> (Vec<u8>, Vec<Value>,
     for v in &mats {
         bin.extend(v.to_le_bytes());
     }
+    // appended after the matrices (older readers stop at 4 + 52 N bytes): u32 sortPriority[N], u8 depth byte[N]
+    for v in &sorts {
+        bin.extend(v.to_le_bytes());
+    }
+    bin.extend(&depths);
     (bin, table, skipped)
 }
 
@@ -1205,7 +1223,7 @@ impl<'a> Zone<'a> {
             let _ = mk;
         }
         if !decal_table.is_empty() {
-            notes.push(format!("{} decals in {} materials (projected boxes; {} skipped for lack of a texture)", (decals.len() - 4) / 52, decal_table.len(), decal_skipped));
+            notes.push(format!("{} decals in {} materials (projected boxes; {} skipped for lack of a texture)", u32::from_le_bytes(decals[..4].try_into().unwrap()), decal_table.len(), decal_skipped));
         }
         let lv = spec.livery.as_ref();
         let info = json!({
@@ -1270,7 +1288,7 @@ impl<'a> Zone<'a> {
         &self.inst
     }
 
-    /// Binary: u32 N, u32 material[N] (index into info.decals), f32 matrix[N][12].
+    /// Binary: u32 N, u32 material[N] (index into info.decals), f32 matrix[N][12], then u32 sortPriority[N] and u8 depth byte[N] (appended 2026-11-23).
     pub fn decals(&self) -> &[u8] {
         &self.decals
     }

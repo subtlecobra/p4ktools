@@ -850,11 +850,12 @@ impl<'a> MatRegistry<'a> {
                 Some(o) if self.lazy_textures => self.texture(o, ""),
                 _ => -1,
             };
-            mat.insert(
-                "decal".into(),
-                json!({"falloff": num_param(&s.params, "AlphaFalloff", 1.0),
-                       "angle": num_param(&s.params, "AngleFadeThreshold", num_param(&s.params, "NormalAngleFadeThreshold", 0.0)), "opac": opac}),
-            );
+            let mut dj = json!({"falloff": num_param(&s.params, "AlphaFalloff", 1.0),
+                       "angle": num_param(&s.params, "AngleFadeThreshold", num_param(&s.params, "NormalAngleFadeThreshold", 0.0)), "opac": opac});
+            if sh == "Decal" {
+                self.projected_decal_params(s, &mut dj);
+            }
+            mat.insert("decal".into(), dj);
         }
         // render-target screens: the viewer draws them (see `mfd`)
         let rk = mfd::rtt_kind(&s.shader, &s.textures);
@@ -1203,6 +1204,37 @@ impl<'a> MatRegistry<'a> {
                     "factor": num_param(p, "BlendFactor", 1.0), "falloff": num_param(p, "BlendFalloff", 1.0)}))
     }
 
+    /// The rest of the projected-decal pixel shader's inputs (decals.md 6.2 / 6.3, CONFIRMED names = the PS cbuffer members): the three output weights
+    /// `cb` ColorBlendFactor / `nb` NormalBlendFactor / `gb` GlossySpecularBlendFactor, the blend modes `am` / `nm` / `sm`, the cull masks `ic` IndoorCull / `ot`
+    /// ObjectTypeCullMask, `dt` / `nt` = MatDiffuseTCMatrix / MatNormalTCMatrix tile + offset ([tileU, tileV, offU, offV]; no rotation in the PS), and the maps:
+    /// `norm` TexSlot2 (packed normal + gloss, the Illum 'ng' form: its alpha companion is the SmoothnessMap), `spec` TexSlot4.  The defaults of an unset factor are
+    /// the shader's cbuffer defaults, which are runtime data (UNKNOWN): 1 for the three factors (EMPIRICAL: ColorBlendFactor is 1 in 432 of 496 files), 0 for modes and masks.
+    fn projected_decal_params(&mut self, s: &Sub, dj: &mut Value) {
+        let p = &s.params;
+        for (k, name, d) in [("cb", "ColorBlendFactor", 1.0), ("nb", "NormalBlendFactor", 1.0), ("gb", "GlossySpecularBlendFactor", 1.0), ("am", "AlbedoBlendMode", 0.0),
+            ("nm", "NormalBlendMode", 0.0), ("sm", "SpecGlossBlendMode", 0.0), ("ic", "IndoorCull", 0.0), ("ot", "ObjectTypeCullMask", 0.0)] {
+            dj[k] = json!(num_param(p, name, d));
+        }
+        let tc = |slot: &str| -> Value {
+            let t = s.texmods.iter().find(|(sl, _)| sl == slot).map(|(_, t)| t);
+            let (tile, off) = t.map_or(((1.0, 1.0), (0.0, 0.0)), |t| (t.tile.unwrap_or((1.0, 1.0)), t.off.unwrap_or((0.0, 0.0))));
+            json!([tile.0, tile.1, off.0, off.1])
+        };
+        dj["sc"] = g4(&s.specular); // MatSpecColor.rgb (gamma-encoded like every material colour of the feed)
+        dj["dt"] = tc("TexSlot1");
+        dj["nt"] = tc("TexSlot2");
+        if self.lazy_textures {
+            if let Some(n) = s.texture("TexSlot2").filter(|n| is_ddna(n)) {
+                let v = self.texture(n, "ng");
+                dj["norm"] = json!(v);
+            }
+            if let Some(n) = s.texture("TexSlot4").filter(|n| name_tail(n) == "spec") {
+                let v = self.texture(n, "");
+                dj["spec"] = json!(v);
+            }
+        }
+    }
+
     /// Mesh decals.  Two shaders draw them, both forward alpha-blended geometry lying on the surface it decorates (a clip-space z
     /// bias):
     ///
@@ -1246,6 +1278,8 @@ impl<'a> MatRegistry<'a> {
         out.insert("mult".into(), json!(num(&["DecalAlphaMultiplier", "DecalAlphaMult"], 1.0)));
         out.insert("falloff".into(), json!(num(&["DecalFalloff"], 1.0)));
         out.insert("cut".into(), json!(num(&["AlphaGlowCutoff"], 0.0)));
+        // DecalDiffuseOpacity multiplies the diffuse alpha of the GBuffer blend (decals.md 3.2 item 7, CONFIRMED; 1 when unset)
+        out.insert("ddo".into(), json!(num(&["DecalDiffuseOpacity"], 1.0)));
         out.insert("blend".into(), json!(!gen_has(&s.gen_mask, "DISABLE_ALPHA_BLEND")));
         out.insert("k".into(), json!(if mesh { 1 } else { 0 }));
         out.insert("v".into(), json!(decal_variant(&s.shader, &s.gen_mask)));
@@ -1877,6 +1911,23 @@ mod tests {
         assert_eq!(glow_intensity(&s), 400.0);
         s.glow_amount = Some(1.0);
         assert!((glow_intensity(&s) - 4.0).abs() < 1e-12);
+    }
+
+    /// Real archive: the projected-decal parameters of a Decal material with a normal map (decals.md 6.3) and the MeshDecal DecalDiffuseOpacity.  Skips without the archive.
+    #[test]
+    fn real_archive_projected_decal_params() {
+        let Ok(path) = std::env::var("P4K_PATH") else { return };
+        let Ok(p4k) = P4k::open(std::path::Path::new(&path)) else { return };
+        let mut reg = MatRegistry::with_options(&p4k, 256, false, true);
+        let gi = reg.resolve("materials/decals/rocks/riverbankrocks", 0);
+        assert!(gi >= 0);
+        let d = reg.materials[gi as usize]["decal"].clone();
+        for k in ["cb", "nb", "gb", "am", "nm", "sm", "ic", "ot", "dt", "nt", "sc", "norm"] {
+            assert!(d.get(k).is_some(), "decal.{} missing: {}", k, d);
+        }
+        assert!(d["norm"].as_i64().unwrap() >= 0, "TexSlot2 rock_01_ddna is the normal map: {}", d);
+        assert_eq!(d["dt"].as_array().unwrap().len(), 4);
+        assert!(d["cb"].as_f64().unwrap() > 0.0);
     }
 
     fn mtl_stub() -> SubMaterial {

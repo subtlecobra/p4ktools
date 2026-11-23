@@ -126,7 +126,8 @@ pub struct Stats {
     pub palette_order: Vec<String>,
     pub lights: Vec<(Value, String, [f64; 12])>,
     pub volumes: Vec<(Value, [f64; 12])>,
-    pub decals: Vec<(String, [f64; 12])>,
+    /// (material path, matrix, sortPriority, depth byte)
+    pub decals: Vec<(String, [f64; 12], u32, u8)>,
     pub no_geometry_cls: HashMap<String, usize>,
     /// classes in order of first appearance (see `palette_order`)
     pub no_geometry_order: Vec<String>,
@@ -322,7 +323,7 @@ pub fn collect_instances_cat(
             continue;
         }
         if let Some(mat) = &en.decal {
-            stats.decals.push((mat.clone(), m));
+            stats.decals.push((mat.clone(), m, en.decal_sort, en.decal_depth));
             continue;
         }
         if let (Some(lp), Some(cat), Some(c)) = (&en.ladder, cat, cls) {
